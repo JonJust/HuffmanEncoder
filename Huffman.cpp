@@ -48,6 +48,10 @@ Huffman.encodeFileWithTree(string inputFile, string treeFile, string outputFile)
 #include <iomanip>
 #include "SimpleQueue.h"
 
+#define BUFF_SIZE 1024 // Size of the buffer arrays that will be used to limit r/w operations (Make power of 2)
+
+using namespace std;
+
 Huffman::Huffman() // Constructor
 {
 	for (int i = 0; i < 256; i++) // Set all leaf values
@@ -60,9 +64,9 @@ Huffman::Huffman() // Constructor
 		leaves[i]->weight = 0;
 	}
 
-	for (int i = 0; i < 510; i++) pairOrder[i] = 0x00; // Clear pairOrder array
+	fill_n(pairOrder, 510, 0); // Clear pairOrder array
 
-	for (int i = 0; i < 256; i++) charCipher[i] = ""; // Clear charCipher array
+	fill_n(charCipher, 256, 0); // Clear pairOrder array
 
 	root = nullptr;
 
@@ -163,7 +167,7 @@ void Huffman::decodeFile(string inputFile, string outputFile)
 	while (input.read((char*)&c, sizeof(c)))
 	{
 
-		for (int i = 128; i >= 1; i = i / 2) // Starts at 2^7, then goes down to 2^6, 2^5....
+		for (int i = 128; i >= 1; i = i >> 1) // Starts at 2^7, then goes down to 2^6, 2^5....
 		{
 			if (c & i) traverse = traverse->rPtr; // If the indexed bit in the read byte is 1, go left down the tree
 			else traverse = traverse->lPtr; // else, go right down the tree
@@ -291,7 +295,7 @@ void Huffman::countChar(string inputFile)
 /* [Private Method]
 *  Creates an instance of ifstream to target file.
 * 
-*  Crawls through the file byte-by-byte and updates the node weights for every instance a byte
+*  Crawls through the file buffer-by-buffer and updates the node weights for every instance a byte
 *  appears in the file.
 * 
 */
@@ -305,9 +309,24 @@ void Huffman::countChar(string inputFile)
 		return;
 	}
 
-	unsigned char c;
+	unsigned char buffer[BUFF_SIZE]; // Buffer code reads into
 
-	while (input.read((char*)&c, sizeof(c))) leaves[c]->weight++; // crawls through file and gets the count of each byte
+	while (!input.eof())
+	{
+		input.read((char*)buffer, BUFF_SIZE); // reads 512 bytes into buffer
+		unsigned char* p = buffer;
+
+		if (input.gcount() == BUFF_SIZE) // If the read filled the buffer....
+		{
+			for (int i = 0; i < BUFF_SIZE; i++) leaves[*(p++)]->weight++; // ... Adjust weights for every leaf in array ...
+		}
+		else
+		{
+			for (int i = 0; i < input.gcount(); i++) leaves[*(p++)]->weight++; // ... Else, only adjust weights for how filled the buffer is ...
+			break;
+		}
+
+	}
 
 	input.close();
 }
@@ -323,9 +342,16 @@ HNode* Huffman::getMinNode(HNode* exclude)
 
 	HNode* target = leaves[0];
 
-	if (leaves[0] == exclude)  // If we have passed leaves[0] as the node to exclude, find next nonnullptr node in leaves[] to start loop with
+	if (target == exclude)  // If we have passed leaves[0] as the node to exclude, find next non-nullptr node in leaves[] to start loop with
 	{
-		for (int i = 0; i < 256; i++) if (leaves[i] != nullptr) target = leaves[i];
+		for (int i = 1; i < 256; i++) // start at 1 because leaves[0] is excluded
+		{
+			if (leaves[i] != nullptr)
+			{
+				target = leaves[i];
+				break;
+			}
+		}
 	}
 
 	for (int i = 0; i < 256; i++) // crawl through leaf array
@@ -357,13 +383,9 @@ void Huffman::initTree(string inputFile)
 
 	for (int i = 0; i < 255; i++) // Build tree
 	{
-		HNode* min = getMinNode(); // gets least weighted node in the whole array (Biased towards top of array)
-		pairOrder[pairIndex] = min->key;
-		pairIndex++;
+		HNode* min = getMinNode(); // gets least weighted node in the whole array (Biased towards lower subscripts)
 
 		HNode* secondMin = getMinNode(min); // gets second least weighted node in array
-		pairOrder[pairIndex] = secondMin->key;
-		pairIndex++;
 
 		HNode* parent = new HNode; // create new parent node
 		parent->weight = min->weight + secondMin->weight; // parent node's weight will be equal to the sum of it's children
@@ -371,6 +393,11 @@ void Huffman::initTree(string inputFile)
 
 		if (min->key < secondMin->key)
 		{
+			pairOrder[pairIndex] = min->key;
+			pairIndex++;
+			pairOrder[pairIndex] = secondMin->key;
+			pairIndex++;
+
 			parent->lPtr = min; // lower-subscripted nodes go the the left... 
 			parent->rPtr = secondMin; // ... And higher subscripted nodes go to the right
 			parent->key = min->key; // The parent will inheret its right-childs key. (This is used to keep track of where it will end up in the array)
@@ -380,6 +407,11 @@ void Huffman::initTree(string inputFile)
 		}
 		else
 		{
+			pairOrder[pairIndex] = secondMin->key;
+			pairIndex++;
+			pairOrder[pairIndex] = min->key;
+			pairIndex++;
+
 			parent->lPtr = secondMin; // lower-subscripted nodes go the the left... 
 			parent->rPtr = min; // ... And higher subscripted nodes go to the right
 			parent->key = secondMin->key; // The parent will inheret its right-childs key. (This is used to keep track of where it will end up in the array)
@@ -527,7 +559,7 @@ void Huffman::writeCodeToFile(string inputFile, string outputFile)
 	ifstream input(inputFile, ios::binary);
 	ofstream output(outputFile, ios::binary);
 
-	for (int i = 0; i < 510; i++) output.write((char*)&pairOrder[i], sizeof(pairOrder[i])); // Writes the 510-byte header to the output file
+	output.write((char*)pairOrder, 510); // Writes the 510-byte header to the output file
 
 	if (!input.is_open())
 	{
@@ -536,70 +568,83 @@ void Huffman::writeCodeToFile(string inputFile, string outputFile)
 		return;
 	}
 
-	unsigned char c;
 	string code = "";
-	SimpleQueue* queue = new SimpleQueue();
+	unsigned char buffer[BUFF_SIZE]; // Written into from inputFile
+	unsigned char inBuffer[BUFF_SIZE]; // Buffer that will be written to outputFile
+	fill_n(inBuffer, BUFF_SIZE, 0);
+	fill_n(buffer, BUFF_SIZE, 0); // clear arrays before moving forward
+	int inBufferIndex = 0;
 
-	while (input.read((char*)&c, sizeof(c)))
+	while (!input.eof())
 	{
-
-		code = charCipher[c];
-
-		for (int i = 0; i < code.length(); ++i) // Adds the code string to the queue bit-by-bit
+		input.read((char*)buffer, BUFF_SIZE); // reads 512 bytes from file into buffer array
+		unsigned char* p = buffer; // points to the first byte in the BUFF_SIZE byte buffer
+		if (input.gcount() == BUFF_SIZE)
 		{
+			for (int i = 0; i < BUFF_SIZE; i++) code += charCipher[*(p++)]; // Append char cipher of given byte to code, and move to next location in array
 
-			if (code.at(i) == '0') queue->add('0');
-			else queue->add('1');
+			while (code.length() >= 8)
+			{
+				unsigned char c = 0;  // start with a byte of zeroes
+				if (code[0] == '1') c |= 0x80;
+				if (code[1] == '1') c |= 0x40;
+				if (code[2] == '1') c |= 0x20;
+				if (code[3] == '1') c |= 0x10;
+				if (code[4] == '1') c |= 0x08;
+				if (code[5] == '1') c |= 0x04;
+				if (code[6] == '1') c |= 0x02;
+				if (code[7] == '1') c |= 0x01;
+				inBuffer[inBufferIndex++] = c;
+
+				if (inBufferIndex == BUFF_SIZE) // If the buffer index is equal to the size, write the buffer to the file and reset index
+				{
+					output.write((char*)inBuffer, BUFF_SIZE); 
+					fill_n(inBuffer, BUFF_SIZE, 0);
+					inBufferIndex = 0;
+				}
+
+				code = code.substr(8);
+
+			}
 
 		}
-
-		// The for loop is here to ensure that items are taken out of the queue faster than they are put in.
-		// This has a minimal impact on performance and makes the code far less RAM-intensive.
-		for (int i = 0; i < 2; i++) if (queue->length > 8) // When there is at least 8 elements in queue, start building file (needs to be done to conserve memory)
+		else
 		{
+			output.write((char*)inBuffer, inBufferIndex); // Write what is already in the input buffer to the file and clear it
+			fill_n(inBuffer, BUFF_SIZE, 0);
+			inBufferIndex = 0;
 
-			unsigned char in = 0; // Build the byte to be written to text file
+			for (int i = 0; i < input.gcount(); i++) code += charCipher[*(p++)]; // Append char cipher of given byte to code, and move to next location in array
+			while (true)
+			{
+				unsigned char c = 0;  // start with a byte of zeroes
+				if (code[0] == '1') c |= 0x80;
+				if (code[1] == '1') c |= 0x40;
+				if (code[2] == '1') c |= 0x20;
+				if (code[3] == '1') c |= 0x10;
+				if (code[4] == '1') c |= 0x08;
+				if (code[5] == '1') c |= 0x04;
+				if (code[6] == '1') c |= 0x02;
+				if (code[7] == '1') c |= 0x01;
+				inBuffer[inBufferIndex] = c;
 
-			if (queue->offer() == '1') in = in | 128;
-			if (queue->offer() == '1') in = in | 64;
-			if (queue->offer() == '1') in = in | 32;
-			if (queue->offer() == '1') in = in | 16;
-			if (queue->offer() == '1') in = in | 8;
-			if (queue->offer() == '1') in = in | 4;
-			if (queue->offer() == '1') in = in | 2;
-			if (queue->offer() == '1') in = in | 1;		
+				if (code.length() == 0) // If the code length is zero, the string has been processed: write the buffer to the file and reset index
+				{
+					output.write((char*)inBuffer, inBufferIndex); 
+					fill_n(inBuffer, BUFF_SIZE, 0);
+					break;
+				}
 
-			output.write((char*)&in, sizeof(in)); // Finally, write the byte to the queue
+				inBufferIndex++;
+				if (code.length() >= 8) code = code.substr(8);
+				else code = "";
 
+			}
 		}
 
 	}
 
 	input.close();
-
-	while (queue) // The file should be mostly done at this point, but this will drain the rest of the queue
-	{
-		unsigned char in = 0; // Build the byte to be written to text file
-
-		if (queue->offer() == '1') in = in | 128;
-		if (queue->offer() == '1') in = in | 64;
-		if (queue->offer() == '1') in = in | 32;
-		if (queue->offer() == '1') in = in | 16;
-		if (queue->offer() == '1') in = in | 8;
-		if (queue->offer() == '1') in = in | 4;
-		if (queue->offer() == '1') in = in | 2;
-		if (queue->offer() == '1') in = in | 1;
-
-		output.write((char*)&in, sizeof(in)); // Append byte to file
-
-		if (queue->isEmpty())
-		{
-			delete queue; // Breaks the loop and cleans garbage
-			queue = nullptr;
-		}
-
-	}
-
 	output.close();
 
 	ifstream bytesIn(inputFile, ios::binary | ios::ate); // Finally, output elapsed time and bytes in/out to console
